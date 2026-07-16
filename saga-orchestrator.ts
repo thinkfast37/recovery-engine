@@ -4,6 +4,7 @@ import {
   StepResult,
   SagaStore,
   SagaStatus,
+  SagaRunResult,
   StepCheckpoint,
 } from './saga-types';
 
@@ -16,7 +17,7 @@ export class SagaOrchestrator {
     this.store = store;
   }
 
-  async run(sagaId: string, input: Record<string, unknown>): Promise<any> {
+  async run(sagaId: string, input: Record<string, unknown>): Promise<SagaRunResult> {
     const state = await this.store.init(sagaId);
     const context: SagaContext = {
       sagaId,
@@ -69,16 +70,36 @@ export class SagaOrchestrator {
         // Fetch the absolute latest state from store to ensure we have all completed steps
         const currentState = await this.store.load(sagaId);
         if (currentState) {
-          await this.compensate(sagaId, currentState.checkpoints, context);
-        }
+          const compensationResult = await this.compensate(sagaId, currentState.checkpoints, context);
 
-        await this.store.updateSagaStatus(sagaId, 'COMPENSATED');
-        return {
-          sagaStatus: 'COMPENSATED' as SagaStatus,
-          outputs: context.outputs,
-          failedStepId: step.stepId,
-          error,
-        };
+          if (compensationResult.success) {
+            await this.store.updateSagaStatus(sagaId, 'COMPENSATED');
+            return {
+              sagaStatus: 'COMPENSATED' as SagaStatus,
+              outputs: context.outputs,
+              failedStepId: step.stepId,
+              error,
+              compensationErrors: compensationResult.errors,
+            };
+          } else {
+            await this.store.updateSagaStatus(sagaId, 'FAILED');
+            return {
+              sagaStatus: 'FAILED' as SagaStatus,
+              outputs: context.outputs,
+              failedStepId: step.stepId,
+              error,
+              compensationErrors: compensationResult.errors,
+            };
+          }
+        } else {
+          await this.store.updateSagaStatus(sagaId, 'COMPENSATED');
+          return {
+            sagaStatus: 'COMPENSATED' as SagaStatus,
+            outputs: context.outputs,
+            failedStepId: step.stepId,
+            error,
+          };
+        }
       }
     }
 
@@ -93,8 +114,8 @@ export class SagaOrchestrator {
     sagaId: string,
     checkpoints: StepCheckpoint[],
     context: SagaContext
-  ): Promise<void> {
-    // Get all COMPLETED steps from the checkpoints provided (which are current)
+  ): Promise<{ success: boolean; errors: { stepId: string; error: Error }[] }> {
+    const errors: { stepId: string; error: Error }[] = [];
     const completed = checkpoints
       .filter((c) => c.status === 'COMPLETED')
       .reverse();
@@ -102,8 +123,17 @@ export class SagaOrchestrator {
     for (const checkpoint of completed) {
       const stepDefinition = this.steps.find((s) => s.stepId === checkpoint.stepId);
       if (stepDefinition && typeof stepDefinition.compensate === 'function') {
-        await stepDefinition.compensate(context);
+        try {
+          await stepDefinition.compensate(context);
+        } catch (e) {
+          errors.push({ stepId: checkpoint.stepId, error: e as Error });
+        }
       }
     }
+
+    return {
+      success: errors.length === 0,
+      errors
+    };
   }
 }

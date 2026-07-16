@@ -51,15 +51,37 @@ class SagaOrchestrator {
                 // Fetch the absolute latest state from store to ensure we have all completed steps
                 const currentState = await this.store.load(sagaId);
                 if (currentState) {
-                    await this.compensate(sagaId, currentState.checkpoints, context);
+                    const compensationResult = await this.compensate(sagaId, currentState.checkpoints, context);
+                    if (compensationResult.success) {
+                        await this.store.updateSagaStatus(sagaId, 'COMPENSATED');
+                        return {
+                            sagaStatus: 'COMPENSATED',
+                            outputs: context.outputs,
+                            failedStepId: step.stepId,
+                            error,
+                            compensationErrors: compensationResult.errors,
+                        };
+                    }
+                    else {
+                        await this.store.updateSagaStatus(sagaId, 'FAILED');
+                        return {
+                            sagaStatus: 'FAILED',
+                            outputs: context.outputs,
+                            failedStepId: step.stepId,
+                            error,
+                            compensationErrors: compensationResult.errors,
+                        };
+                    }
                 }
-                await this.store.updateSagaStatus(sagaId, 'COMPENSATED');
-                return {
-                    sagaStatus: 'COMPENSATED',
-                    outputs: context.outputs,
-                    failedStepId: step.stepId,
-                    error,
-                };
+                else {
+                    await this.store.updateSagaStatus(sagaId, 'COMPENSATED');
+                    return {
+                        sagaStatus: 'COMPENSATED',
+                        outputs: context.outputs,
+                        failedStepId: step.stepId,
+                        error,
+                    };
+                }
             }
         }
         await this.store.updateSagaStatus(sagaId, 'COMPLETED');
@@ -69,16 +91,25 @@ class SagaOrchestrator {
         };
     }
     async compensate(sagaId, checkpoints, context) {
-        // Get all COMPLETED steps from the checkpoints provided (which are current)
+        const errors = [];
         const completed = checkpoints
             .filter((c) => c.status === 'COMPLETED')
             .reverse();
         for (const checkpoint of completed) {
             const stepDefinition = this.steps.find((s) => s.stepId === checkpoint.stepId);
             if (stepDefinition && typeof stepDefinition.compensate === 'function') {
-                await stepDefinition.compensate(context);
+                try {
+                    await stepDefinition.compensate(context);
+                }
+                catch (e) {
+                    errors.push({ stepId: checkpoint.stepId, error: e });
+                }
             }
         }
+        return {
+            success: errors.length === 0,
+            errors
+        };
     }
 }
 exports.SagaOrchestrator = SagaOrchestrator;

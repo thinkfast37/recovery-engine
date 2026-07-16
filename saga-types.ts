@@ -70,4 +70,9 @@ export interface SagaRunResult {
   // Populated when sagaStatus is FAILED or COMPENSATED.
   failedStepId?: string;
   error?: unknown;
+  /**
+   * Errors encountered during compensation.
+   * If empty, it means all compensations succeeded (or none were needed).
+   */
+  compensationErrors?: { stepId: string; error: Error }[];
 }
